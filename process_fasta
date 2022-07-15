@@ -1,0 +1,36 @@
+#!/bin/bash
+#Name: process_fasta
+
+#The bash command shell must be used to run this script
+#The command line to run this file is:
+## $./process_fasta < in.fasta > got.fasta
+#where "in.fasta" is a list of n sequences separated by ">name of sequence"
+
+#if any permission issues are raised in command line, use the command
+## $chmod +x process_fasta
+#to get around them
+
+cleanup () {
+	rm -rf "$scratch"
+}
+
+scratch=$(mktemp -d -t)
+cd "$scratch"
+
+set -- "${1:-/dev/stdin}"
+csplit -z --quiet --prefix=XXFQXX $1 /">"/ '{*}'
+ls XXFQXX* > loop.txt
+
+file='loop.txt'
+exec 0<$file
+while read -r line
+do
+	#var1="$(sed '1d' $line)"
+	md="$(sed '1d' $line | md5sum | awk '{print $1}')"
+	sed -i "1 s/.*/$md/" $line
+	sed "1 s/^/>/" $line > $line.XXFQXX.COMP.txt
+done
+
+cat *XXFQXX.COMP.txt
+
+trap cleanup EXIT
