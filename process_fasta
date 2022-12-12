@@ -25,7 +25,6 @@ file='loop.txt'
 exec 0<$file
 while read -r line
 do
-	#var1="$(sed '1d' $line)"
 	md="$(sed '1d' $line | md5sum | awk '{print $1}')"
 	sed -i "1 s/.*/$md/" $line
 	sed "1 s/^/>/" $line > $line.XXFQXX.COMP.txt
