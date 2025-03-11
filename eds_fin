@@ -1,0 +1,479 @@
+---
+title: "carpenter_final"
+author: "Madeline Carpenter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup 
+```{r lib, echo=FALSE, message=FALSE}
+suppressPackageStartupMessages(library(tidyverse, warn.conflicts=FALSE))
+library(ggplot2)
+library(e1071)
+library(randomForest)
+library(class)
+library(stats)
+library(MASS)
+library(car)
+library(factoextra)
+library(FactoMineR)
+library(leaps)
+library(glmnet)
+library(boot)
+library(reshape2)
+```
+
+```{r}
+uncert.fxn <- function(df, verbose=FALSE){
+  err <- ((df[1,1] + df[2,2])/(df[1,1] + df[2,2] + df[1,2] + df[2,1]))*100
+  
+  if (verbose=="FALSE"){
+    err
+  } else if (verbose=="TRUE"){
+    train.err <- (100-err)
+    cat("Error: ",
+        signif(err, 3), "%\n", sep="")
+    cat("Training Error: ", signif(train.err, 3), "%\n", sep="")
+  }
+}
+
+assess.prediction <- function(truth, predicted, verbose=FALSE){
+  predicted <- predicted[! is.na(truth)]
+  truth <- truth[!is.na(truth)]
+  truth <- truth[!is.na(predicted)]
+  predicted <- predicted[!is.na(predicted)]
+  
+  TP <- sum(truth==1 & predicted==1)
+  TN <- sum(truth==0 & predicted==0)
+  FP <- sum(truth==0 & predicted==1)
+  FN <- sum(truth==1 & predicted==0)
+  P <- TP + FN
+  N <- FP + TN
+  
+  if (verbose=="FALSE"){
+    sens <- TP/(TP + FN)
+    spec <- TN/(FP + TN)
+    cbind(sens, spec)
+  } else if (verbose=="TRUE"){
+    cat("Total cases that are not NA: ", length(truth), "\n", sep="")
+    cat("Correct predictions (accuracy): ", 
+        sum(truth==predicted), 
+        " (", signif(sum(truth==predicted)*100/length(truth),3),"%)\n", sep="")
+      cat("TPR (sensitivity)=TP/P: ",
+          signif(100*TP/P,3), "%\n", sep="")
+      cat("TNR (specificity)=TN/N: ",
+          signif(100*TN/N,3), "%\n", sep="")
+      cat("PPV (precision)=TP/(TP+FP): ",
+          signif(100*TP/(TP + FP),3), "%\n", sep="")
+      cat("FDR (false discovery)=1-PPV: ",
+          signif(100*FP/(TP + FP),3), "%\n", sep="")
+      cat("FPR=FP/N=1-TNR: ",
+          signif(100*FP/N,3), "%\n", sep="")
+  }
+}
+
+lrfxn <- function(df, idx){
+  f1 <- glm(response~., data=df, family=binomial, subset=idx)
+  wifprobs <- predict(f1, type="response")
+  trpred <- rep("Y", as.numeric(length(wifprobs)))
+  trpred[wifprobs<0.5]="N"
+  wiftab <- table(trpred, df$response)
+  err <- uncert.fxn(wiftab)
+  lrprednum <- ifelse(wifprobs<0.5,0,1)
+  tractual <- assess.prediction(ifelse(df$response=="Y",1,0), lrprednum)
+  final <- cbind(tractual, err)
+  return(final)
+}
+
+ldafxn <- function(df, idx){
+  f1 <- MASS::lda(response~., data=df, subset=idx)
+  ldpred <- predict(f1)
+  wiftab <- table(ldpred$class, df$response)
+  err <- uncert.fxn(wiftab)
+  lrprednum <- ifelse(ldpred$class=="N",0,1)
+  tractual <- assess.prediction(ifelse(df$response=="Y",1,0), lrprednum)
+  final <- cbind(tractual, err)
+  return(final)
+}
+
+rffxn <- function(df, train){
+  rfRes <- randomForest(response~., train)
+  forprobs <- predict(rfRes, test)
+  
+  rferr <- rfRes$confusion |> 
+    subset(select=c(1,2))
+  
+  oob <- rfRes$confusion |> 
+    subset(select=c(3)) |>
+    sum()
+
+  err <- uncert.fxn(rferr)
+  
+  rfprednum <- ifelse(forprobs=="Y",as.numeric(1),as.numeric(0))
+  rfactual <- assess.prediction(ifelse(df$response=="Y",1,0), rfprednum)
+  final <- cbind(rfactual, err) |>
+    cbind(oob)
+  return(final)
+}
+
+svfxn <- function(df){
+    train <- df %>% dplyr::sample_frac(0.25)
+    test <- dplyr::anti_join(df, train)
+    a <- test[-c(1)]
+
+    svfit <- svm(response~., data=train, kernel="radial", cost=1, gamma=0.3, scale=FALSE)
+  
+    predsv <- predict(svfit, a)
+    tunradtab <- table(predict=predsv, truth=test$response)
+    err <- uncert.fxn(tunradtab)
+
+    svnum <- ifelse(predsv=="Y", as.numeric(1), as.numeric(0))
+    svact <- assess.prediction(ifelse(df$response=="Y",1,0), svnum)
+    final <- cbind(svact, err)
+    return(final)
+  }
+```
+
+```{r df}
+fintest <- read.csv("final-data-test.csv", header=T)
+fintrain <- read.csv("final-data-train.csv", header=T)
+```
+
+# Question 1
+```{r dist}
+str(fintrain)
+
+sapply(fintrain, function(x) n_distinct(x))
+```
+
+```{r hist}
+fintrain$dtj <- as.character(fintrain$dtj)
+fintrain$ypz <- as.character(fintrain$ypz)
+
+num_cols <- fintrain[, sapply(fintrain, is.numeric)]
+
+for(i in 1:ncol(num_cols)){
+  print(ggplot(num_cols, aes(x=num_cols[,i])) + geom_histogram(binwidth=as.numeric(0.10*(max(num_cols[,i])-min(num_cols[,i]))),
+                                                         color="black", fill="white") +
+    labs(x=colnames(num_cols[i]), y="Count"))
+}
+```
+
+## Pairs
+```{r pairs}
+num_prs <- fintrain[, sapply(fintrain, is.numeric)]
+num_prs$response <- as.factor(fintrain$response)
+num_prs <- num_prs %>% relocate(response, .before=id)
+
+pairs(num_prs[2:6], pch=10, cex=0.5, col=num_prs$response)
+```
+
+## PCA
+```{r pca, warning=FALSE}
+x <- fintrain %>%
+    mutate(across(where(is.numeric), scale))
+
+x <- x[2:ncol(x)]
+
+catpca <- model.matrix(~., -1, data=x)
+
+modpca <- PCA(catpca, graph=FALSE)
+pcares <- PCA(catpca, graph=FALSE)
+
+fviz_pca_var(pcares, axes=c(1,2), col.ind=as.factor(fintrain$response), geom="text")
+
+fviz_pca_biplot(pcares, axes=c(1,2), col.ind=as.factor(fintrain$response), geom="point")
+fviz_pca_biplot(pcares, axes=c(1,3), col.ind=as.factor(fintrain$response), geom="point")
+fviz_pca_biplot(pcares, axes=c(2,3), col.ind=as.factor(fintrain$response), geom="point")
+```
+
+
+```{r}
+fviz_pca_biplot(pcares, col.ind=as.factor(fintrain$wc), geom="point")
+fviz_pca_biplot(pcares, col.ind=as.factor(fintrain$zwp), geom="point")
+fviz_pca_biplot(pcares, col.ind=as.factor(fintrain$ku), geom="point")
+```
+
+
+```{r}
+fviz_pca_biplot(pcares, axes=c(1,3), col.ind=as.factor(fintrain$zwp), geom="point")
+```
+
+
+## Test of Associations
+```{r univ}
+cat_cols <- fintrain[, sapply(fintrain, is.character)]
+cat_cols$response <- as.factor(fintrain$response)
+cat_cols <- cat_cols %>% relocate(response, .before=wc)
+
+fishtb <- data.frame()
+
+for(i in 2:ncol(cat_cols)){
+  x <- table(cat_cols$response, cat_cols[,i])
+  fishcat <- fisher.test(x, simulate.p.value = TRUE)
+  y <- cbind(colnames(cat_cols)[i], fishcat$p.value)
+  fishtb <- rbind(fishtb, y)
+}
+
+fishtb
+```
+
+```{r, warning=FALSE}
+for(i in 2:ncol(cat_cols)){
+  print(ggplot(cat_cols, aes(x=cat_cols[,i])) + geom_histogram(stat="count") +
+          labs(x=colnames(cat_cols[i]), y="Count") + theme_bw())
+}
+```
+
+```{r}
+ttnum <- lapply(num_prs[-1], function(x) t.test(x~num_prs$response)$p.value)
+data.frame(ttnum)
+```
+
+## Collinearity
+```{r}
+test <- num_cols
+test$response <- ifelse(fintrain$response=="N",0,1)
+model <- lm(response~., data=test)
+vif(model)
+```
+
+```{r}
+drop <- c("ent", "ox", "id")
+traindrop <- fintrain[,!(names(fintrain) %in% drop)] |>
+  mutate(across(where(is.numeric), scale))
+
+x <- model.matrix(response~.,traindrop)[,-1]
+y <- traindrop[,"response"]
+y2y <- ifelse(y=="Y",as.numeric(1),as.numeric(0))
+
+lassRes <- glmnet(x,y2y,alpha=1)
+cvlassRes <- cv.glmnet(x,y2y,alpha=1)
+
+predict(lassRes,type="coefficients",s=cvlassRes$lambda.1se)
+```
+
+
+# Question 2
+```{r}
+drop <- c("dtj", "sci", "bw", "is", "ypz")
+trdrop2 <- traindrop[,!(names(traindrop) %in% drop)]
+
+tr01n <- trdrop2 %>% 
+  relocate(response, .before=wc) %>%
+  mutate(across(where(is.character), as.factor)) 
+```
+
+```{r, warning=FALSE}
+trglm <- glm(response~., data=tr01n, family=binomial)
+summary(trglm)$coef
+```
+
+
+```{r}
+lrpred <- predict(trglm, type="response")
+trpred <- rep("Y", as.numeric(length(lrpred)))
+trpred[lrpred<0.5]="N"
+
+trtab <- table(trpred, tr01n$response)
+
+uncert.fxn(trtab, verbose=TRUE)
+```
+
+```{r}
+lrprednum <- ifelse(lrpred<0.5,0,1)
+tractual <- ifelse(tr01n$response=="Y",1,0)
+assess.prediction(lrprednum, tractual, verbose=TRUE)
+```
+
+```{r, warning=FALSE}
+n <- 250
+
+set.seed(123)
+
+trlg <- data.frame(boot(tr01n, lrfxn, R=n)$t)
+colnames(trlg) <- c("sens", "spec", "error")
+trlg$method <- "Logistic Regression"
+```
+
+# Problem 3
+```{r}
+trlda <- MASS::lda(response~., data=tr01n)
+
+ldapred <- predict(trlda)
+ldatab <- table(ldapred$class, tr01n$response)
+
+ldatab
+uncert.fxn(ldatab, verbose=TRUE)
+```
+
+```{r, eval=FALSE}
+tdf <- matrix(NA, nrow=10, ncol=4)
+
+for(i in 2:ncol(tr01n)){
+  newtr <- tr01n[-c(i)]
+  extrlda <- MASS::lda(response~., data=newtr)
+  exldapred <- predict(extrlda)
+  exldatab <- table(exldapred$class, newtr$response)
+  err <- uncert.fxn(exldatab)
+  exldaprednum <- ifelse(exldapred$class=="N",0,1)
+  exp <- assess.prediction(exldaprednum, ifelse(newtr$response=="Y",1,0))
+  tdf[(as.numeric(i-1)),] <- cbind(i, exp) |>
+    cbind(err)
+}
+```
+
+```{r}
+ldaprednum <- ifelse(ldapred$class=="N",0,1)
+assess.prediction(ldaprednum, tractual, verbose=TRUE)
+```
+
+```{r, warning=FALSE}
+trlda <- data.frame(boot(tr01n, ldafxn, R=n, sim="balanced")$t)
+colnames(trlda) <- c("sens", "spec", "error")
+trlda$method <- "LDA"
+```
+
+
+# Problem 4
+```{r}
+rfRes <- randomForest(response~., tr01n)
+rfRes$confusion
+```
+
+```{r}
+varImpPlot(rfRes)
+```
+
+```{r}
+rferr <- rfRes$confusion |> 
+  subset(select=c(1,2)) 
+
+uncert.fxn(rferr, verbose=TRUE)
+```
+
+```{r}
+rfdf <- matrix(NA, nrow=n, ncol=4)
+
+for(i in 1:n){
+  train <- tr01n %>% dplyr::sample_frac(0.25)
+  test <- dplyr::anti_join(tr01n, train)
+  rfboot <- rffxn(test, train)
+  rfdf[i,] <- rfboot
+}
+
+rfdf2 <- data.frame(rfdf)
+colnames(rfdf2) <- c("sens", "spec", "error", "ooberr")
+rfdf2$method <- "Random Forest"
+```
+
+
+```{r, message=FALSE}
+rferrs <- rfdf2[c(3,4)]
+rferrs$ooberr <- 100*(rferrs$ooberr)
+rfmelt <- melt(rferrs)
+
+ggplot(rfmelt, aes(x=variable, y=value, fill=variable)) + 
+  geom_boxplot(show.legend=FALSE) + labs(title="Random Forest OOB and Test Error", 
+                        x="Method", y="Test Error") +
+  scale_fill_brewer("blues") + theme_bw()
+
+```
+
+
+# Problem 5
+```{r}
+tune3.out <- tune(svm, response~., data=tr01n, kernel="radial",
+                 ranges=list(cost=c(0.1, 1, 10, 50)))
+tune3.out
+```
+
+
+```{r}
+ntun <- 10
+
+tunradmat <- matrix(NA, nrow=ntun, ncol=4)
+
+for(i in 1:ntun){
+  train <- tr01n %>% dplyr::sample_frac(0.25)
+  test <- dplyr::anti_join(tr01n, train)
+
+  x <- train[,-1]
+  y <- train[,1]
+  a <- test[-c(1)]
+
+  tune.rad <- tune(svm, response~., data=train, kernel="radial", ranges=list(cost=c(0.5, 1, 1.5), gamma=c(0.5, 0.3, 1)))
+  
+  tunrad.mod <- tune.rad$best.model
+  tunrad.c <- tune.rad$best.model$cost
+  tunrad.g <- tune.rad$best.model$gamma
+  
+  predwif <- predict(tunrad.mod, a)
+  tunradtab <- table(predict=predwif, truth=test$response)
+  err <- uncert.fxn(tunradtab)
+
+  tunradmat[i,] <- cbind(i, tunrad.c, tunrad.g, err)
+}
+```
+
+
+```{r, message=FALSE}
+svmmat <- matrix(NA, nrow=n, ncol=3)
+
+for(i in 1:n){
+  svmmat[i,] <- svfxn(tr01n)
+}
+
+svmdf <- data.frame(svmmat)
+colnames(svmdf) <- c("sens", "spec", "error")
+svmdf$method <- "SVM"
+
+```
+
+
+# Problem 6
+```{r}
+allmods <- rbind(svmdf, trlda, trlg)
+
+rfdfmod <- rfdf2[-c(4)]
+allmods <- rbind(allmods, rfdfmod)
+```
+
+```{r}
+ggplot(allmods, aes(x=method, y=sens, fill=method)) + 
+  geom_boxplot(show.legend=FALSE) + labs(title="Sensitivity", 
+                        x="Method", y="Sensitivity") +
+  scale_fill_brewer("blues") + theme_bw()
+
+ggplot(allmods, aes(x=method, y=spec, fill=method)) + 
+  geom_boxplot(show.legend=FALSE) + labs(title="Specificity", 
+                        x="Method", y="Specificity") +
+  scale_fill_brewer("blues") + theme_bw()
+
+ggplot(allmods, aes(x=method, y=error, fill=method)) + 
+  geom_boxplot(show.legend=FALSE) + labs(title="Test Error", 
+                        x="Method", y="Test Error") +
+  scale_fill_brewer("blues") + theme_bw()
+```
+
+# Writing Test Data
+```{r, eval=FALSE}
+dropfin <- c("ent", "ox", "id", "is", "dtj", "sci", "bw", "ypz")
+
+testdrop <- fintest[,!(names(fintest) %in% dropfin)] |>
+  mutate(across(where(is.numeric), scale)) |>
+  mutate(across(where(is.character), as.factor))
+
+finpreds <- predict(rfRes, testdrop)
+finaldf <- data.frame(cbind(fintest$id, finpreds))
+
+colnames(finaldf) <- c("id", "mcarpmod")
+
+finaldf$mcarpmod <- ifelse(finaldf$mcarpmod=="1", as.character("N"), as.character("Y"))
+
+write.csv(finaldf, file="carpenter_finpred.csv", quote=FALSE)
+```
