@@ -1,5 +1,5 @@
 # Miscellaneous
-This folder holds code from miscellaneous projects.
+This folder holds code from miscellaneous projects. Please note that most of my professional projects are either under NDA, currently in publication, or property of other research institutions.
 
 ## R Scripts
 - *cm_rm.R* is an R script that transforms column-major order data to row-major order data. 
